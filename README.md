@@ -76,3 +76,47 @@ With `--train_batch_size=8 --num_train_epochs=3.0` and 554400 in `train.tsv`, we
 
 ![Loss convergence without and with gradient accumulation](Loss_Step.png)
 We can see that the loss convergence is less noisy as expected (ie. the loss is mainly within 0.5 with the gradient accumulation vs higher or noisier otherwise).
+
+## Another example
+Typical `tf.estimator` workflow involves specifying `model_fn`, which returns the ops necessary to perform training, evaluation, or predictions. This example is based on [01_Regression/09 - TF Regression Example - Housing Price Estimation + Keras.ipynb](https://github.com/GoogleCloudPlatform/tf-estimator-tutorials/blob/ed1d56c08606478f012c67ef9a1fd78d90938512/01_Regression/09%20-%20TF%20Regression%20Example%20-%20Housing%20Price%20Estimation%20%2B%20Keras.ipynb) from [GCP/tf-estimator-tutorial](https://github.com/GoogleCloudPlatform/tf-estimator-tutorials/commit/ed1d56c08606478f012c67ef9a1fd78d90938512). Applying gradient accumulation in this example is practically not helpful, since the graph does not consume a lot of memory. However, I hope this example illustrates the steps for modifications of a typical *train_op*, which usually consists of a one-liner: `optimizer.minimize`.
+
+The `_train_op_fn` modifications are as follow: (vs [01_Regression/09 - TF Regression Example - Housing Price Estimation + Keras.ipynb](https://github.com/GoogleCloudPlatform/tf-estimator-tutorials/blob/ed1d56c08606478f012c67ef9a1fd78d90938512/01_Regression/09%20-%20TF%20Regression%20Example%20-%20Housing%20Price%20Estimation%20%2B%20Keras.ipynb).  It is defined inside `model_fn` function.) Please see the complete file: [`another-example.py`](another-example.py).
+
+* First, we get a handle of the `global_step`, which will be used in the `tf.cond` in the *train_op*. 
+* `accum_grads` is the variable to accumulate the gradients
+* If the `global_step` is an integer multiple of `gradient_accumulation_multiplier`, then we do `apply_accumulated_gradients`, otherwise we simply accumulate the gradients. We divide the accumulated gradients by `gradient_accumulation_multiplier` before calling `optimizer.apply_gradients`, and we zero out `accum_grads` after that.
+* `global_step` is not incremented inside `optimizer.apply_gradients`. It is incremented outside, for both branches of the `tf.cond` of the *train_op*.
+
+
+```
+def _train_op_fn(loss):
+    """Returns the op to optimize the loss."""
+
+    global_step = tf.train.get_global_step()
+
+    tvars = tf.trainable_variables()
+    grads = tf.gradients(loss, tvars)
+    accum_grads = [tf.Variable(tf.zeros_like(t_var.initialized_value()), trainable=False) for t_var in tvars]
+
+    optimizer = tf.train.AdamOptimizer()
+
+    def apply_accumulated_gradients(accum_grads, grads, tvars):
+        accum_op= tf.group([accum_grad.assign_add(grad) for (accum_grad, grad) in zip(accum_grads, grads)])
+        with tf.control_dependencies([accum_op]):
+            normalized_accum_grads = [1.0*accum_grad/gradient_accumulation_multiplier for accum_grad in accum_grads]
+            # global_step is not incremented inside optimizer.apply_gradients
+            minimize_op= optimizer.apply_gradients(zip(normalized_accum_grads, tvars), global_step = None)
+            with tf.control_dependencies([minimize_op]):
+                zero_op= tf.group([accum_grad.assign(tf.zeros_like(accum_grad)) for accum_grad in accum_grads])
+        return zero_op
+
+    # Create training operation
+    train_op = tf.cond(tf.math.equal(global_step % gradient_accumulation_multiplier, 0),
+        lambda: apply_accumulated_gradients(accum_grads, grads, tvars),
+        lambda: tf.group([accum_grad.assign_add(grad) for (accum_grad, grad) in zip(accum_grads, grads)])
+    )
+
+    # global_step is incremented here, regardless of the tf.cond branch
+    train_op = tf.group(train_op, [tf.assign_add(global_step, 1)])
+    return train_op
+```
