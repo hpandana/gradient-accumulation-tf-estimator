@@ -120,3 +120,22 @@ def _train_op_fn(loss):
     train_op = tf.group(train_op, [tf.assign_add(global_step, 1)])
     return train_op
 ```
+
+
+## Distributed example
+Is it possible to do gradient accumulation in a distributed setting? I was confused to why one would do this, once one has access to a cluster of machines. Since gradient accumulation is a form of *serialization* to accomodate low memory GPU, and not like *data-parallelization* offered by access to a cluster of resources. After some thoughts, I guess the rationale is perhaps that you have sevaral hosts, each with small memory GPU, on which you want to distribute the run. Following the example of [multi-worker with estimator](https://www.tensorflow.org/tutorials/distribute/multi_worker_with_estimator), I put together an example to modify the *train_op* to allow gradient accumulation in distributed setting. I am not sure about the memory saving though.
+
+* [`mnist_dataset.py`](distributedExample/mnist_dataset.py): to read MNIST data files into `tf.data.Dataset` format. Please [download](http://yann.lecun.com/exdb/mnist/) the gz files locally: [train-images-idx3-ubyte.gz](http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz), [train-labels-idx1-ubyte.gz](http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz)[train-labels-idx1-ubyte.gz](http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz), [t10k-images-idx3-ubyte.gz](http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz).
+* [`01_single_worker_with_estimator.py`](distributedExample/01_single_worker_with_estimator.py): has the single worker run without gradient accumulation.
+* [`02_single_worker_with_estimator_gaccum.py`](distributedExample/02_single_worker_with_estimator_gaccum.py): has the single worker run with gradient accumulation, using the *train_op* modification described above.
+* [`03_multi_worker_with_estimator.py`](distributedExample/03_multi_worker_with_estimator.py): have the multi worker run without gradient accumulation
+* [`04_multi_worker_with_estimator_gaccum.py`](distributedExample/04_multi_worker_with_estimator_gaccum.py): have the multi worker run with gradient accumulation. Note that the `loss` here, in 04, is divided by `num_workers`, while it is not needed in 03. Because the `compute_gradients` called by `optimizer.minimize` has taken care of that through `_scale_loss`, while an explicit `tf.gradients` does not take care of that `1/num_replicas` normalization.
+* Please modify *tfconfig* accordingly in 03 and 04 examples before running. See the guide [here](https://www.tensorflow.org/guide/distributed_training#setting_up_tf_config_environment_variable).
+
+Here is the loss vs steps of the runs:
+* The first run is the baseline.
+* The second run is in effect doing a mini-batch of 200 but using the *serialization* of gradient accumulation to trade-off runtime vs memory.
+* The third run is also effectively doing a mini-batch of 200 with each *parallelized* worker training 100 sample per batch.
+* The forth run is also effectively doing a mini-batch of 200. Each step, two workers are running 50 samples each, and gradients are accumulated every 2 steps.
+
+![Loss convergence without and with gradient accumulation in multi worker](Loss_Step_multiWorker.png)
